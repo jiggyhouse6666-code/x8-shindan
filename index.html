@@ -182,7 +182,7 @@ h1, h2, h3 { text-wrap: balance; font-weight: 800; }
 .reveal.shown::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 60%; z-index: 1; pointer-events: none; background: linear-gradient(0deg, rgba(8,7,12,.97) 0%, rgba(8,7,12,.8) 42%, rgba(8,7,12,0) 100%); }
 .reveal .rtitle { position: relative; z-index: 2; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .reveal .skip { position: relative; z-index: 2; font-size: 11px; letter-spacing: .2em; color: var(--fg-mute); }
-.flash { font-family: var(--f-display); font-weight: 800; font-size: clamp(30px, 9.4vw, 48px); line-height: 1.3; letter-spacing: .05em; color: #fff; text-wrap: balance;
+.flash { font-family: var(--f-display); font-weight: 800; font-size: min(48px, calc((100vw - 64px) / (var(--n, 8) * 1.08))); line-height: 1.3; letter-spacing: .05em; color: #fff; text-wrap: balance;
   text-shadow: 0 0 30px rgba(var(--tcrgb), .95), 0 0 70px rgba(var(--tcrgb), .6), 0 2px 0 rgba(0,0,0,.5); animation: flash 1s cubic-bezier(.2,1.2,.4,1) both; }
 @keyframes flash { 0% { opacity: 0; transform: scale(1.5); filter: blur(10px); letter-spacing: .3em; } 100% { opacity: 1; transform: scale(1); filter: blur(0); letter-spacing: .05em; } }
 
@@ -201,7 +201,7 @@ h1, h2, h3 { text-wrap: balance; font-weight: 800; }
 .hero .htext { position: relative; z-index: 2; margin-top: 340px; display: flex; flex-direction: column; gap: 8px; }
 .hero .tno { font-family: var(--f-num); font-style: italic; font-weight: 600; font-size: 18px; letter-spacing: .12em; color: var(--tc); text-shadow: 0 0 16px rgba(var(--tcrgb), .8); display: flex; align-items: center; gap: 12px; }
 .hero .tno::after { content: ''; width: 44px; height: 1px; background: var(--tc); }
-.hero .tname { font-family: var(--f-display); font-weight: 800; font-size: clamp(28px, 8.4vw, 40px); line-height: 1.28; letter-spacing: .04em; color: #fff; text-shadow: 0 0 30px rgba(var(--tcrgb), .7), 0 2px 0 rgba(0,0,0,.45); text-wrap: balance; }
+.hero .tname { font-family: var(--f-display); font-weight: 800; font-size: min(44px, calc((100vw - 110px) / (var(--n, 8) * 1.08))); line-height: 1.28; letter-spacing: .04em; color: #fff; text-shadow: 0 0 30px rgba(var(--tcrgb), .7), 0 2px 0 rgba(0,0,0,.45); text-wrap: balance; }
 .hero .catch { margin-top: 6px; font-size: 14px; font-weight: 500; color: var(--fg); line-height: 1.7; letter-spacing: .06em; }
 .hero .subtag { margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(var(--tcrgb), .4); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; color: var(--fg-dim); letter-spacing: .1em; }
 .hero .subtag b { color: var(--tc); font-weight: 700; font-size: 14px; letter-spacing: .06em; }
@@ -273,6 +273,8 @@ h1, h2, h3 { text-wrap: balance; font-weight: 800; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important; transition-duration: .01ms !important; }
   .spark { display: none; }
 }
+.tl { display: block; white-space: nowrap; }
+.hero .tname .tl + .tl, .flash .tl + .tl { margin-top: .06em; }
 </style>
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
@@ -556,6 +558,20 @@ const TITLES = {
   Y: 'ミステリアス色気ホスト！',
   G: '努力で這い上がる成長ホスト！'
 };
+
+const TITLE_LINES = {
+  K: ['カリスマ王様', 'ホスト！'],
+  L: ['沼らせ聞き上手', 'ホスト！'],
+  M: ['盛り上げ番長', 'ホスト！'],
+  S: ['戦略家プロデューサー', 'ホスト！'],
+  Y: ['ミステリアス色気', 'ホスト！'],
+  G: ['努力で這い上がる', '成長ホスト！']
+};
+function titleLines(key) {
+  const L = TITLE_LINES[key];
+  const n = Math.max(L[0].length, L[1].length);
+  return { n: n, nodes: L.map(function (t, i) { return React.createElement('span', { key: i, className: 'tl' }, t); }) };
+}
 
 /* タイプ別の髪色（上→下）と目の色 */
 const LOOK = {
@@ -1091,7 +1107,7 @@ function RevealScreen(props) {
           h('p', { className: 'eyebrow' }, 'Analyzing 10 / 10'))
       : h('div', { key: 'b', className: 'rtitle' },
           h('p', { className: 'eyebrow' }, 'あなたは'),
-          h('div', { className: 'flash' }, TITLES[type.key])),
+          h('div', { className: 'flash', style: { '--n': titleLines(type.key).n } }, titleLines(type.key).nodes)),
     h('p', { className: 'skip' }, 'タップでスキップ')
   );
 }
@@ -1220,7 +1236,7 @@ function ResultScreen(props) {
       h('p', { className: 'pre' }, 'あなたのホスト適性は……'),
       h('div', { className: 'htext' },
         h('p', { className: 'tno' }, type.name),
-        h('h1', { className: 'tname' }, TITLES[type.key]),
+        h('h1', { className: 'tname', style: { '--n': titleLines(type.key).n } }, titleLines(type.key).nodes),
         h('p', { className: 'catch' }, type.catch),
         h('p', { className: 'subtag' }, 'サブタイプ', h('b', null, sub.name)))),
     sec(nx, 'Result', '診断結果',
