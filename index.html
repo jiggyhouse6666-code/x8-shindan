@@ -1306,7 +1306,7 @@ function App() {
   function next() {
     if (answers[idx] === null) return;
     if (idx < N - 1) { setDir(1); setIdx(idx + 1); }
-    else { setScreen('reveal'); }
+    else { try { X8Counter.record(TYPES[analyze(answers).main].key); } catch (e) { /* 数えられなくても診断は止めない */ } setScreen('reveal'); }
   }
   function prev() {
     if (idx > 0) { setDir(-1); setIdx(idx - 1); }
@@ -1346,5 +1346,416 @@ function App() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+<script>
+/* ===== 診断カウンター(数える側) + 管理者だけが見られる画面 =====
+   ・診断を最後まで終えた時だけ、匿名で「+1」を送ります。名前・回答の中身・端末の情報は送りません。
+   ・数字を読めるのは、管理者ログインした人だけです(読み取りの制限はサーバー側のルールで行っています)。
+   ・管理者画面の開き方: この診断のURLの末尾に  #admin  をつけて開く。 */
+var X8Counter = (function () {
+  'use strict';
+
+  /* ---- 設定 ---- */
+  var APP = 'host';                                   // host = ホスト適性診断 / hoscrazy = 歌舞伎町ホスト狂い診断
+  var DB = 'https://x8open-default-rtdb.firebaseio.com';    // 数字を貯めるデータベース
+  var API_KEY = 'AIzaSyBMkuBSZ75otzTCNT2fdFsxcHaTGk86Lz4'; // x8open の公開用キー(売上アプリと同じもの)
+  var ADMIN_EMAIL = 'admin@x8sales.app';                    // 管理者アカウント(売上アプリの管理者と同じ)
+  var APPS = [
+    { id: 'host', title: 'ホスト適性診断', types: [
+      ['K', 'カリスマ王様型'], ['L', '沼らせ・聞き上手型'], ['M', '盛り上げ番長型'],
+      ['S', '戦略家プロデューサー型'], ['Y', 'ミステリアス・色気型'], ['G', '努力で這い上がる成長型']] },
+    { id: 'hoscrazy', title: '歌舞伎町ホスト狂い診断', types: [
+      ['T1', '爆盛り姫'], ['T2', '夜職の女王'], ['T3', '社畜の擬人化'], ['T4', '恋愛偏差値バグ'],
+      ['T5', '友営ストリート'], ['T6', 'メンヘラ界の天使'], ['T7', '古のホス狂い'], ['T8', '東横民']] }
+  ];
+
+  var K_SKIP = 'x8c:skip';
+  function kUniq(a) { return 'x8c:u:' + a; }
+  var memUniq = {};
+  var lastAt = 0;
+  var overlay = null;
+  var token = '';
+
+  /* ---- 小さな道具 ---- */
+  function store(op, k, v) {
+    try {
+      if (op === 'get') return window.localStorage.getItem(k);
+      if (op === 'set') { window.localStorage.setItem(k, v); return true; }
+      if (op === 'del') { window.localStorage.removeItem(k); return true; }
+    } catch (e) { /* 保存できない端末でも動かす */ }
+    return null;
+  }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function jst(ms) {                       // 日本時間の日付 'YYYYMMDD'
+    var d = new Date(ms + 9 * 3600 * 1000);
+    return d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate());
+  }
+  function jstLabel(ms) {                  // '11/13(金)'
+    var d = new Date(ms + 9 * 3600 * 1000);
+    return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '(' + '日月火水木金土'.charAt(d.getUTCDay()) + ')';
+  }
+  function jstTime(ms) {                   // '11/13 16:20'
+    var d = new Date(ms + 9 * 3600 * 1000);
+    return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+  }
+  function fmt(n) {
+    n = Number(n) || 0;
+    try { return n.toLocaleString('ja-JP'); } catch (e) { return String(n); }
+  }
+  function findApp(id) {
+    for (var i = 0; i < APPS.length; i++) { if (APPS[i].id === id) return APPS[i]; }
+    return null;
+  }
+  function hasType(app, key) {
+    for (var i = 0; i < app.types.length; i++) { if (app.types[i][0] === key) return true; }
+    return false;
+  }
+  function inc() { return { '.sv': { increment: 1 } }; }
+
+  /* ---- 数える(診断を最後まで終えた時に1回だけ呼ばれる) ---- */
+  function record(typeKey) {
+    try {
+      var app = findApp(APP);
+      if (!app || !DB || !hasType(app, typeKey)) return;
+      if (store('get', K_SKIP) === '1') return;            // 管理者が「この端末は数えない」にした端末
+      var t = Date.now();
+      if (t - lastAt < 4000) return;                       // 連打・二重送信よけ
+      lastAt = t;
+      var first = store('get', kUniq(APP)) !== '1' && !memUniq[APP];
+      var body = {};
+      body.total = inc();                                  // のべ回数
+      if (first) body.unique = inc();                      // この端末で初めて → 人数
+      body['t_' + typeKey] = inc();                        // 結果タイプ別
+      body['d_' + jst(t)] = inc();                         // 日別(日本時間)
+      body.last = { '.sv': 'timestamp' };                  // 最後に診断された時刻
+      fetch(DB + '/shindan/' + APP + '.json', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        if (r && r.ok) { memUniq[APP] = true; store('set', kUniq(APP), '1'); }
+      }, function () { /* 送れなくても診断には影響させない */ });
+    } catch (e) { /* 何があっても診断は止めない */ }
+  }
+
+  /* ---- 管理者画面 ---- */
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) { e.className = cls; }
+    if (text !== undefined && text !== null) { e.textContent = text; }
+    return e;
+  }
+
+  var CSS = [
+    '.x8a{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;background:#0c0a12;color:#f4eef8;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;line-height:1.6;letter-spacing:0;text-align:left;padding:calc(16px + env(safe-area-inset-top,0px)) 16px calc(32px + env(safe-area-inset-bottom,0px))}',
+    '.x8a *{box-sizing:border-box}',
+    '.x8a-wrap{max-width:520px;margin:0 auto}',
+    '.x8a-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 14px}',
+    '.x8a-top h1{font-size:18px;font-weight:800;margin:0;line-height:1.3}',
+    '.x8a-badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.08em;padding:1px 8px;border-radius:999px;background:#2b2140;color:#cdb8ff;margin-left:8px;vertical-align:2px}',
+    '.x8a button{font:inherit;color:inherit;border:0;cursor:pointer;touch-action:manipulation;-webkit-appearance:none;appearance:none}',
+    '.x8a-btn{min-height:44px;padding:10px 16px;border-radius:10px;background:#ff5fa2;color:#fff;font-weight:800;font-size:15px}',
+    '.x8a-btn.sub{background:#241f31;color:#e8e0f2;border:1px solid #39324b}',
+    '.x8a-btn[disabled]{opacity:.55}',
+    '.x8a-card{background:#16121e;border:1px solid #2c2639;border-radius:14px;padding:16px;margin:0 0 14px}',
+    '.x8a-card h2{font-size:16px;font-weight:800;margin:0 0 12px;line-height:1.4}',
+    '.x8a-card h3{font-size:13px;font-weight:700;margin:16px 0 4px;color:#cdb8ff;line-height:1.4}',
+    '.x8a input[type=password]{display:block;width:100%;min-height:46px;border-radius:10px;border:1px solid #3a3350;background:#0f0c16;color:#fff;padding:10px 12px;font-size:16px;font-family:inherit}',
+    '.x8a-msg{font-size:13px;margin:10px 0 0;color:#ff9db8;min-height:1.3em}',
+    '.x8a-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
+    '.x8a-stat{background:#0f0c16;border:1px solid #29233a;border-radius:12px;padding:10px 12px;min-width:0}',
+    '.x8a-stat b{display:block;font-size:30px;line-height:1.2;font-weight:800;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.x8a-stat b.s{font-size:20px;line-height:2}',
+    '.x8a-stat span{font-size:12px;color:#a99bc0}',
+    '.x8a-row{display:flex;align-items:center;gap:10px;font-size:13px;margin:9px 0}',
+    '.x8a-row .n{flex:0 0 6.8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.x8a-bar{flex:1;height:8px;border-radius:999px;background:#241f31;overflow:hidden}',
+    '.x8a-bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#ff5fa2,#ffd76a)}',
+    '.x8a-row .v{flex:0 0 auto;min-width:2.6em;text-align:right;font-variant-numeric:tabular-nums;font-weight:700}',
+    '.x8a-row .v small{font-weight:400;color:#a99bc0;margin-left:4px;font-size:11px}',
+    '.x8a-row.st{flex-wrap:wrap;gap:5px 10px;margin:12px 0}',
+    '.x8a-row.st .n{order:1;flex:1 1 0;min-width:0;white-space:normal}',
+    '.x8a-row.st .v{order:2;flex:0 0 auto}',
+    '.x8a-row.st .x8a-bar{order:3;flex:0 0 100%}',
+    '.x8a-note{font-size:12px;color:#a99bc0;line-height:1.75;margin:0}',
+    '.x8a-note + .x8a-note{margin-top:6px}',
+    '.x8a-acts{display:flex;gap:10px;margin:0 0 14px}',
+    '.x8a-acts .x8a-btn{flex:1}',
+    '.x8a-sw{display:flex;align-items:center;gap:10px;font-size:14px;margin:0 0 6px}',
+    '.x8a-sw input{width:22px;height:22px;margin:0;flex:none;accent-color:#ff5fa2}'
+  ].join('\n');
+
+  function ensureStyle() {
+    if (document.getElementById('x8a-style')) { return; }
+    var s = document.createElement('style');
+    s.id = 'x8a-style';
+    s.textContent = CSS;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  /* 画面の外枠(上のバー)を作り直して、中身を入れる場所を返す */
+  function shell() {
+    overlay.textContent = '';
+    var wrap = el('div', 'x8a-wrap');
+    var top = el('div', 'x8a-top');
+    var h1 = el('h1', null, '診断カウンター');
+    h1.appendChild(el('span', 'x8a-badge', '管理者'));
+    var close = el('button', 'x8a-btn sub', '閉じる');
+    close.type = 'button';
+    close.addEventListener('click', function () { closeAdmin(false); });
+    top.appendChild(h1);
+    top.appendChild(close);
+    wrap.appendChild(top);
+    overlay.appendChild(wrap);
+    overlay.scrollTop = 0;
+    return wrap;
+  }
+
+  function fail(code) { var e = new Error(code); e.code = code; return e; }
+
+  function msgFor(e) {
+    var c = e && e.code;
+    if (c === 'bad') { return 'パスワードが違います'; }
+    if (c === 'many') { return '回数が多すぎます。しばらくしてからもう一度やってください'; }
+    if (c === 'denied') { return 'このアカウントでは数字を見られません'; }
+    if (c === 'expired') { return 'ログインの期限が切れました。もう一度ログインしてください'; }
+    if (c === 'net') { return 'つながりませんでした。電波のいい所でもう一度'; }
+    return '読み込めませんでした';
+  }
+
+  function signIn(pw) {
+    return fetch('https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=' + encodeURIComponent(API_KEY), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN_EMAIL, password: pw, returnSecureToken: true })
+    }).then(function (r) {
+      return r.json().then(function (j) { return j; }, function () { return {}; }).then(function (j) {
+        if (r.ok && j && j.idToken) { return j.idToken; }
+        var m = String((j && j.error && j.error.message) || '');
+        if (/TOO_MANY/.test(m)) { throw fail('many'); }
+        if (/INVALID_PASSWORD|INVALID_LOGIN_CREDENTIALS|EMAIL_NOT_FOUND|USER_DISABLED/.test(m)) { throw fail('bad'); }
+        throw fail('other');
+      });
+    }, function () { throw fail('net'); });
+  }
+
+  function fetchAll() {
+    return fetch(DB + '/shindan.json?auth=' + encodeURIComponent(token)).then(function (r) {
+      if (r.status === 401 || r.status === 403) {
+        return r.json().then(function (j) { return j; }, function () { return {}; }).then(function (j) {
+          throw fail(/expired|Auth token/i.test(String((j && j.error) || '')) ? 'expired' : 'denied');
+        });
+      }
+      if (!r.ok) { throw fail('other'); }
+      return r.json();
+    }, function () { throw fail('net'); });
+  }
+
+  function renderLogin(msg) {
+    token = '';
+    var wrap = shell();
+    var c = el('section', 'x8a-card');
+    c.appendChild(el('h2', null, '管理者ログイン'));
+    var f = el('form');
+    var inp = el('input');
+    inp.type = 'password';
+    inp.name = 'password';
+    inp.placeholder = '管理者パスワード';
+    inp.setAttribute('autocomplete', 'current-password');
+    inp.setAttribute('autocapitalize', 'off');
+    inp.setAttribute('autocorrect', 'off');
+    inp.setAttribute('aria-label', '管理者パスワード');
+    var btn = el('button', 'x8a-btn', 'ログイン');
+    btn.type = 'submit';
+    btn.style.width = '100%';
+    btn.style.marginTop = '12px';
+    var m = el('div', 'x8a-msg', msg || '');
+    m.setAttribute('role', 'alert');
+    f.appendChild(inp);
+    f.appendChild(btn);
+    f.appendChild(m);
+    f.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var pw = inp.value;
+      if (!pw) { m.textContent = 'パスワードを入れてください'; return; }
+      btn.disabled = true;
+      btn.textContent = '確認中…';
+      m.textContent = '';
+      signIn(pw).then(function (t) { token = t; return fetchAll(); }).then(function (data) {
+        inp.value = '';
+        renderStats(data);
+      }, function (e) {
+        token = '';
+        btn.disabled = false;
+        btn.textContent = 'ログイン';
+        if (e && e.code === 'bad') { inp.value = ''; }
+        m.textContent = msgFor(e);
+      });
+    });
+    c.appendChild(f);
+    wrap.appendChild(c);
+    try { inp.focus(); } catch (e) { /* ignore */ }
+  }
+
+  function pick(d, prefix) {                // 'd_20261113' → {'20261113': n}
+    var o = {};
+    Object.keys(d).forEach(function (k) { if (k.indexOf(prefix) === 0) { o[k.slice(prefix.length)] = d[k]; } });
+    return o;
+  }
+
+  function calc(app, d) {
+    d = (d && typeof d === 'object') ? d : {};
+    var byDay = pick(d, 'd_');
+    var byType = pick(d, 't_');
+    var now = Date.now();
+    var today = jst(now);
+    function since(n) {
+      var from = jst(now - (n - 1) * 86400000);
+      var s = 0;
+      Object.keys(byDay).forEach(function (k) { if (k >= from && k <= today) { s += Number(byDay[k]) || 0; } });
+      return s;
+    }
+    var typeRows = app.types.map(function (t) { return { label: t[1], n: Number(byType[t[0]]) || 0 }; });
+    typeRows.sort(function (a, b) { return b.n - a.n; });
+    var typeSum = typeRows.reduce(function (s, r) { return s + r.n; }, 0);
+    var dayRows = [];
+    for (var i = 0; i < 14; i++) {
+      var ms = now - i * 86400000;
+      dayRows.push({ label: jstLabel(ms), n: Number(byDay[jst(ms)]) || 0 });
+    }
+    return { total: Number(d.total) || 0, unique: Number(d.unique) || 0, last: Number(d.last) || 0,
+             d1: since(1), d7: since(7), d30: since(30), typeRows: typeRows, typeSum: typeSum, dayRows: dayRows };
+  }
+
+  function stat(big, label, small) {
+    var s = el('div', 'x8a-stat');
+    s.appendChild(el('b', small ? 's' : '', big));
+    s.appendChild(el('span', null, label));
+    return s;
+  }
+
+  function barRow(label, n, max, pct, stacked) {
+    var r = el('div', 'x8a-row' + (stacked ? ' st' : ''));
+    r.appendChild(el('div', 'n', label));
+    var bar = el('div', 'x8a-bar');
+    var i = el('i');
+    i.style.width = (n > 0 ? Math.max(3, Math.round(n / max * 100)) : 0) + '%';
+    bar.appendChild(i);
+    r.appendChild(bar);
+    var v = el('div', 'v', fmt(n));
+    if (pct !== null) { v.appendChild(el('small', null, pct + '%')); }
+    r.appendChild(v);
+    return r;
+  }
+
+  function appCard(app, d) {
+    var c = calc(app, d);
+    var box = el('section', 'x8a-card');
+    box.appendChild(el('h2', null, app.title));
+    var g = el('div', 'x8a-grid');
+    g.appendChild(stat(fmt(c.total), 'のべ回数'));
+    g.appendChild(stat(fmt(c.unique), '人数(端末ごと)'));
+    g.appendChild(stat(fmt(c.d1), '今日'));
+    g.appendChild(stat(fmt(c.d7), '直近7日'));
+    g.appendChild(stat(fmt(c.d30), '直近30日'));
+    g.appendChild(stat(c.last ? jstTime(c.last) : '—', '最後の診断', true));
+    box.appendChild(g);
+    box.appendChild(el('h3', null, '結果タイプ別'));
+    var tmax = Math.max(1, c.typeRows[0] ? c.typeRows[0].n : 1);
+    c.typeRows.forEach(function (r) {
+      box.appendChild(barRow(r.label, r.n, tmax, c.typeSum ? Math.round(r.n / c.typeSum * 100) : 0, true));
+    });
+    box.appendChild(el('h3', null, '日別(直近14日)'));
+    var dmax = Math.max(1, c.dayRows.reduce(function (m, r) { return Math.max(m, r.n); }, 0));
+    c.dayRows.forEach(function (r) { box.appendChild(barRow(r.label, r.n, dmax, null)); });
+    return box;
+  }
+
+  function renderStats(data) {
+    var wrap = shell();
+    var acts = el('div', 'x8a-acts');
+    var re = el('button', 'x8a-btn', '最新にする');
+    re.type = 'button';
+    var out = el('button', 'x8a-btn sub', 'ログアウト');
+    out.type = 'button';
+    acts.appendChild(re);
+    acts.appendChild(out);
+    wrap.appendChild(acts);
+    var msg = el('div', 'x8a-msg', '');
+    msg.setAttribute('role', 'alert');
+    wrap.appendChild(msg);
+    re.addEventListener('click', function () {
+      re.disabled = true;
+      re.textContent = '読み込み中…';
+      fetchAll().then(function (d) { renderStats(d); }, function (e) {
+        if (e && (e.code === 'expired' || e.code === 'denied')) { renderLogin(msgFor(e)); return; }
+        re.disabled = false;
+        re.textContent = '最新にする';
+        msg.textContent = msgFor(e);
+      });
+    });
+    out.addEventListener('click', function () { renderLogin(''); });
+
+    var d = (data && typeof data === 'object') ? data : {};
+    APPS.forEach(function (app) { wrap.appendChild(appCard(app, d[app.id])); });
+
+    var set = el('section', 'x8a-card');
+    set.appendChild(el('h2', null, 'この端末の設定'));
+    var lab = el('label', 'x8a-sw');
+    var cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = store('get', K_SKIP) === '1';
+    lab.appendChild(cb);
+    lab.appendChild(el('span', null, 'この端末の診断は数えない'));
+    cb.addEventListener('change', function () {
+      var ok = cb.checked ? store('set', K_SKIP, '1') : store('del', K_SKIP);
+      if (!ok) { cb.checked = !cb.checked; msg.textContent = 'この端末では設定を保存できませんでした'; }
+    });
+    set.appendChild(lab);
+    set.appendChild(el('p', 'x8a-note', '自分でテストするときに数字が増えないようにするスイッチです。'));
+    wrap.appendChild(set);
+
+    var note = el('section', 'x8a-card');
+    note.appendChild(el('p', 'x8a-note', '診断を最後まで終えた時に自動で+1されます。名前や回答の中身は記録していません。'));
+    note.appendChild(el('p', 'x8a-note', '「人数」は端末ごとの数です。同じスマホで何回やっても1人。別のスマホや、ブラウザのデータを消した人は、もう1人として数えます。'));
+    note.appendChild(el('p', 'x8a-note', 'あくまで目安の数字です。'));
+    wrap.appendChild(note);
+  }
+
+  function openAdmin() {
+    if (overlay) { return; }
+    try {
+      ensureStyle();
+      overlay = el('div', 'x8a');
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-label', '診断カウンター(管理者)');
+      document.body.appendChild(overlay);
+      renderLogin('');
+    } catch (e) {
+      if (overlay && overlay.parentNode) { overlay.parentNode.removeChild(overlay); }
+      overlay = null;
+    }
+  }
+
+  function closeAdmin(fromHash) {
+    token = '';
+    if (overlay && overlay.parentNode) { overlay.parentNode.removeChild(overlay); }
+    overlay = null;
+    if (!fromHash) {
+      try { if (window.location.hash) { window.history.replaceState(null, '', window.location.pathname + window.location.search); } } catch (e) { /* ignore */ }
+    }
+  }
+
+  function syncHash() {
+    var on = /^#admin$/i.test(window.location.hash || '');
+    if (on) { openAdmin(); } else if (overlay) { closeAdmin(true); }
+  }
+  try {
+    window.addEventListener('hashchange', syncHash);
+    syncHash();
+  } catch (e) { /* ignore */ }
+
+  return { record: record };
+})();
 </script>
 </body></html>
